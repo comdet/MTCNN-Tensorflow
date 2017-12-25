@@ -1,5 +1,6 @@
 #coding:utf-8
 import sys
+import time
 from Detection.MtcnnDetector import MtcnnDetector
 from Detection.detector import Detector
 from Detection.fcn_detector import FcnDetector
@@ -39,57 +40,98 @@ W=320
 H=160
 TH_X = 20 #threshold move x
 TH_Y = 20 #threshold move y
-SPEED_X = 40
-SPEED_Y = 40 
+SPEED_X = 20
+SPEED_Y = 20
+TIME_STEP = 0.4
+MOVE_FACTOR_X = 0.028571428
+MOVE_FACTOR_Y = 0.153846153
 #video_capture = cv2.VideoCapture("rtsp://admin:admin@10.0.1.67:554/0/video1")
 src = "rtsp://admin:admin@10.0.1.67:554/0/video1"
+camera_ip = '10.0.1.67'
 
-class ONVIFCamera:
+class FollowCamera:
     def __init__(self,ip,username='admin',password='admin'):
-        self.camera = ONVIFCamera(ip, 80, username, password)
+        self.camera = ONVIFCamera(ip, 80, username, password,'/home/pi/ipcambot/python-onvif/wsdl')
         media = self.camera.create_media_service()
         self.ptz = self.camera.create_ptz_service()
-        media_profile = media.GetProfiles()[0];
-        media_profile.PTZConfiguration._token = media_profile.PTZConfiguration.token
+        media_profile = media.GetProfiles()[0]
+        #media_profile.PTZConfiguration._token = media_profile.PTZConfiguration.token
         # Get PTZ configuration options for getting continuous move range
         self.request = self.ptz.create_type('GetConfigurationOptions')
-        self.request.ConfigurationToken = media_profile.PTZConfiguration.token
-        ptz_configuration_options = self.ptz.GetConfigurationOptions(request)    
+        self.request.ConfigurationToken = media_profile.PTZConfiguration._token
+        ptz_configuration_options = self.ptz.GetConfigurationOptions(self.request)
         self.request = self.ptz.create_type('ContinuousMove')
-        self.request.ProfileToken = media_profile.token    
-        self.ptz.Stop({'ProfileToken': media_profile.token})
+        self.request.ProfileToken = media_profile._token    
+        self.ptz.Stop({'ProfileToken': media_profile._token})
         
         self.XMAX = ptz_configuration_options.Spaces.ContinuousPanTiltVelocitySpace[0].XRange.Max
         self.XMIN = ptz_configuration_options.Spaces.ContinuousPanTiltVelocitySpace[0].XRange.Min
         self.YMAX = ptz_configuration_options.Spaces.ContinuousPanTiltVelocitySpace[0].YRange.Max
         self.YMIN = ptz_configuration_options.Spaces.ContinuousPanTiltVelocitySpace[0].YRange.Min
         
-        self.center = (W/2,H/2)
+        self.delta = [0,0]
+        self.stopped = False
+        self.center = [W/2,H/2]        
+        self.now_point = [0,0]
+        self.lock = False
 
     def set_center(self,center):
-        self.tcenter = center
+        if self.lock == False:
+            self.delta = [center[0] - self.center[0],center[1] - self.center[1]]
+            print('delta changed %d,%d'%(self.delta[0],self.delta[1]))
+
     def follow(self):
-        delta_x = self.tcenter[0] - self.center[0]
-        delta_y = self.tcenter[1] - self.center[1]
-        print("dX : %d, dY %d" % (delta_x,delta_y))
-        if abs(delta_x) > TH_X:
-            xmove = XMIN if delta_x < 0 else XMAX
-            self.center[0] += SPEED_X if delta_x > 0 else -SPEED_X
+        if abs(self.delta[0]) > TH_X:
+            xmove = self.XMIN if self.delta[0] < 0 else self.XMAX
         else:
             xmove = 0 #
-        if abs(delta_y) > TH_Y:
-            ymove = YMIN if delta_y < 0 else YMAX
-            self.center[1] += SPEED_Y if delta_y > 0 else -SPEED_Y
+        if abs(self.delta[1]) > TH_Y:
+            ymove = self.YMAX if self.delta[1] < 0 else self.YMIN
         else:
             ymove = 0
-        print("Move X %d, Move Y %d" %(xmove,ymove))
-        #else if not self.is_moving and xmove != 0: #start moving here
         #########
-        #self.request.Velocity ={ 'PanTilt' : { 'x':xmove,'y':ymove }}
-        #self.ptz.ContinuousMove(self.request)
+        if xmove != 0: #move x first
+            self.request.Velocity ={ 'PanTilt' : { '_x':xmove, '_y':0 }}
+            self.ptz.ContinuousMove(self.request)
+            self.lock = True
+            time.sleep(abs(self.delta[0]) * MOVE_FACTOR_X)
+            self.delta[0] = 0
+            self.ptz.Stop({'ProfileToken': self.request.ProfileToken})
+            self.lock = False
+            #self.delta[0] += -SPEED_X if self.delta[0] > 0 else SPEED_X
+            #self.now_point[0] += -SPEED_X if self.delta[0] > 0 else SPEED_X
+            #print("now_point(%d,%d) delta X : %d, delta Y %d" % (self.now_point[0],self.now_point[1],self.delta[0],self.delta[1]))
+            
+        elif ymove != 0: #move y
+            self.request.Velocity ={ 'PanTilt' : { '_x':0, '_y':ymove }}
+            self.ptz.ContinuousMove(self.request)
+            self.lock = True
+            time.sleep(abs(self.delta[1]) * MOVE_FACTOR_Y)
+            self.delta[1] = 0
+            self.ptz.Stop({'ProfileToken': self.request.ProfileToken})
+            self.lock = False
+            #self.delta[1] += -SPEED_Y if self.delta[1] > 0 else SPEED_Y
+            #self.now_point[1] += -SPEED_Y if self.delta[1] > 0 else SPEED_Y
+            #print("now_point(%d,%d) delta X : %d, delta Y %d" % (self.now_point[0],self.now_point[1],self.delta[0],self.delta[1]))
+        else:
+            pass
+            #self.ptz.Stop({'ProfileToken': self.request.ProfileToken})
+            #print('stop move')
         #########
-        time.sleep(0.4)
 
+        time.sleep(TIME_STEP)
+
+    def runner(self):
+        while not self.stopped:
+            self.follow()
+        print('Thread terminated')
+        
+    def start(self):
+        Thread(target=self.runner,args=()).start()
+        return self
+
+    def stop(self):
+        self.stopped = True
 
 class RTSPStream:
     def __init__(self,src):
@@ -110,6 +152,7 @@ class RTSPStream:
         self.stopped = True
 
 vs = RTSPStream(src).start()
+#follow = FollowCamera(camera_ip).start()
 
 center_point = (W/2,H/2)
 while True:
@@ -156,21 +199,27 @@ while True:
                         (0, 0, 255), 2)
         #FPS 
         cv2.putText(frame, 
-                        '{:.4f}'.format(t) + " " + '{:.3f}'.format(fps), 
-                        (10, 20), 
+                        'TIME {:.4f}'.format(t) + " " + 'FPS {:.3f}'.format(fps), 
+                        (10, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (255, 0, 255), 2)
         #draw center frame
-        if found > 0:
+        if found == True:
             center_point = (xmin+(xmax - xmin)/2,ymin+(ymax-ymin)/2)
             #cv2.circle(frame,center_point, 2, (0,0,255), -1)
+	print("Center : %d,%d" % (center_point[0],center_point[1]))
         cv2.line(frame,(center_point[0],0),(center_point[0],H),(0, 0, 255),1)
         cv2.line(frame,(0,center_point[1]),(W,center_point[1]),(0, 0, 255),1)
-        for i in range(landmarks.shape[0]):
-            for j in range(len(landmarks[i])/2):
-                cv2.circle(frame, (int(landmarks[i][2*j]),int(int(landmarks[i][2*j+1]))), 2, (0,0,255))            
+        #for i in range(landmarks.shape[0]):
+        #    for j in range(len(landmarks[i])/2):
+        #        cv2.circle(frame, (int(landmarks[i][2*j]),int(int(landmarks[i][2*j+1]))), 2, (0,0,255))            
         # time end
         cv2.imshow("", frame)
+
+        #face following
+        #if found == True:
+        #    follow.set_center(center_point)
+
         try:
             cv2.waitKey(1)
         except:
@@ -182,3 +231,4 @@ while True:
 #video_capture.release()
 cv2.destroyAllWindows()
 vs.stop()
+follow.stop()
